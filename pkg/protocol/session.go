@@ -298,6 +298,59 @@ func (s *Session) Delete(
 	}
 }
 
+type TransferResult struct {
+	Count int
+	Size  int64
+	Dest  string
+}
+
+func (s *Session) Transfer(
+	dir string,
+	paths []string,
+	compress bool,
+	destURL string,
+	token string,
+) (*TransferResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.sendCmd(Request{
+		Cmd:      "transfer",
+		Dir:      dir,
+		Paths:    paths,
+		Compress: compress,
+		URL:      destURL,
+		Token:    token,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		resp, err := s.readResponse()
+		if err != nil {
+			return nil, err
+		}
+		switch resp.Type {
+		case TypeTransferDone:
+			return &TransferResult{
+				Count: resp.Count,
+				Size:  resp.Size,
+				Dest:  resp.Dest,
+			}, nil
+		case TypeError:
+			if resp.Fatal {
+				return nil,
+					fmt.Errorf("%s", resp.Message)
+			}
+		default:
+			return nil, fmt.Errorf(
+				"unexpected response: %s", resp.Type,
+			)
+		}
+	}
+}
+
 func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

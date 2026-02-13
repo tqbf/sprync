@@ -120,6 +120,23 @@ func (c *Client) FSWrite(
 	return nil
 }
 
+func (c *Client) FSWriteURL(
+	sprite, path, mode string, mkdir bool,
+) string {
+	q := url.Values{}
+	q.Set("path", path)
+	if mode != "" {
+		q.Set("mode", mode)
+	}
+	if !mkdir {
+		q.Set("mkdir", "false")
+	}
+	return fmt.Sprintf("%s?%s",
+		c.spriteURL(sprite, "/fs/write"),
+		q.Encode(),
+	)
+}
+
 func (c *Client) FSRead(
 	ctx context.Context,
 	sprite, path string,

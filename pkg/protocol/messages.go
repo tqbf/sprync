@@ -13,6 +13,8 @@ type Request struct {
 	Dest     string   `json:"dest,omitempty"`
 	Src      string   `json:"src,omitempty"`
 	Compress bool     `json:"compress,omitempty"`
+	URL      string   `json:"url,omitempty"`
+	Token    string   `json:"token,omitempty"`
 }
 
 type ResponseType string
@@ -24,6 +26,7 @@ const (
 	TypePackDone     ResponseType = "pack_done"
 	TypeExtractDone  ResponseType = "extract_done"
 	TypeDeleteDone   ResponseType = "delete_done"
+	TypeTransferDone ResponseType = "transfer_done"
 	TypeError        ResponseType = "error"
 )
 

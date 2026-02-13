@@ -14,9 +14,10 @@ import (
 
 func diffCmd() *cli.Command {
 	return &cli.Command{
-		Name:      "diff",
-		Usage:     "show what push or pull would do",
-		ArgsUsage: "<localDir> <sprite>:<remoteDir>",
+		Name:  "diff",
+		Usage: "show what push or pull would do",
+		ArgsUsage: "<localDir|sprite:dir>" +
+			" <sprite:dir>",
 		Flags: append(syncFlags(),
 			&cli.StringFlag{
 				Name:  "mode",
@@ -53,15 +54,35 @@ type diffSummary struct {
 func diffAction(c *cli.Context) error {
 	if c.NArg() != 2 {
 		return fmt.Errorf(
-			"usage: sprync diff <localDir> <sprite>:<remoteDir>",
+			"usage: sprync diff <src> <sprite:dir>",
 		)
 	}
-	localDir := c.Args().Get(0)
-	sprite, remoteDir, err := parseTarget(c.Args().Get(1))
+
+	srcSprite, srcDir, srcErr := parseTarget(
+		c.Args().Get(0),
+	)
+	dstSprite, dstDir, err := parseTarget(
+		c.Args().Get(1),
+	)
 	if err != nil {
 		return err
 	}
 
+	if srcErr == nil {
+		return spriteToSpriteDiff(c,
+			srcSprite, srcDir,
+			dstSprite, dstDir,
+		)
+	}
+	return localToSpriteDiff(c,
+		c.Args().Get(0), dstSprite, dstDir,
+	)
+}
+
+func localToSpriteDiff(
+	c *cli.Context,
+	localDir, sprite, remoteDir string,
+) error {
 	token, err := requireToken(c, sprite)
 	if err != nil {
 		return err
@@ -120,11 +141,70 @@ func diffAction(c *cli.Context) error {
 	}
 
 	diff := pack.ComputeDiff(sourceM, targetM, deleteOn)
+	return printDiff(c, diff, sourceM, targetM)
+}
 
-	if c.Bool("json") {
-		return printDiffJSON(
-			diff, sourceM, targetM,
+func spriteToSpriteDiff(
+	c *cli.Context,
+	srcSprite, srcDir, dstSprite, dstDir string,
+) error {
+	token, err := requireToken(c, srcSprite)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := contextWithTimeout(c)
+	defer cancel()
+
+	client := newClient(c, token)
+	excludes := c.StringSlice("exclude")
+	deleteOn := c.Bool("delete")
+
+	srcSess, err := openSession(ctx, client, srcSprite)
+	if err != nil {
+		return fmt.Errorf("src session: %w", err)
+	}
+	defer srcSess.Close(ctx)
+
+	dstSess, err := openSession(ctx, client, dstSprite)
+	if err != nil {
+		return fmt.Errorf("dst session: %w", err)
+	}
+	defer dstSess.Close(ctx)
+
+	srcEntries, srcExists, _, err := srcSess.Manifest(
+		srcDir, excludes,
+	)
+	if err != nil {
+		return fmt.Errorf("src manifest: %w", err)
+	}
+	if !srcExists {
+		return fmt.Errorf(
+			"source %s:%s does not exist",
+			srcSprite, srcDir,
 		)
+	}
+	srcM := entriesToManifest(srcEntries)
+
+	dstEntries, _, _, err := dstSess.Manifest(
+		dstDir, excludes,
+	)
+	if err != nil {
+		return fmt.Errorf("dst manifest: %w", err)
+	}
+	dstM := entriesToManifest(dstEntries)
+
+	diff := pack.ComputeDiff(srcM, dstM, deleteOn)
+	return printDiff(c, diff, srcM, dstM)
+}
+
+func printDiff(
+	c *cli.Context,
+	diff pack.DiffResult,
+	sourceM, targetM pack.Manifest,
+) error {
+	if c.Bool("json") {
+		return printDiffJSON(diff, sourceM, targetM)
 	}
 
 	if len(diff.Uploads) == 0 && len(diff.Deletes) == 0 {
