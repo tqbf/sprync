@@ -101,6 +101,25 @@ func openSession(
 	return sess
 }
 
+func openSessionFor(
+	t *testing.T,
+	client *spriteapi.Client,
+	spryncdBin string,
+	sprite string,
+) *protocol.Session {
+	t.Helper()
+	ctx := context.Background()
+
+	binary, err := os.ReadFile(spryncdBin)
+	require.NoError(t, err)
+
+	sess, err := protocol.OpenSession(
+		ctx, client, sprite, binary,
+	)
+	require.NoError(t, err)
+	return sess
+}
+
 func TestWSSessionReady(t *testing.T) {
 	spryncdBin := buildSpryncd(t)
 	_, client, _ := setupServer(t)
@@ -238,16 +257,6 @@ func TestWSFullPushFlow(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(tarPath)
 
-	err = client.FSWrite(
-		ctx, "test-sprite", tarPath, "0644", false,
-		mustOpen(t, tarPath),
-	)
-	require.NoError(t, err)
-
-	fsTarget := filepath.Join(rootDir, tarPath)
-	_, err = os.Stat(fsTarget)
-	require.NoError(t, err)
-
 	extractResult, err := sess.Extract(
 		remoteDir, tarPath, true,
 	)
@@ -380,12 +389,6 @@ func TestWSBlindPush(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(tarPath)
 
-	err = client.FSWrite(
-		ctx, "test-sprite", tarPath, "0644", false,
-		mustOpen(t, tarPath),
-	)
-	require.NoError(t, err)
-
 	extractResult, err := sess.Extract(
 		remoteDir, tarPath, true,
 	)
@@ -493,7 +496,7 @@ func TestWSSessionClose(t *testing.T) {
 
 func TestWSUploadAndRunSpryncd(t *testing.T) {
 	spryncdBin := buildSpryncd(t)
-	_, client, rootDir := setupServer(t)
+	_, client, _ := setupServer(t)
 	ctx := context.Background()
 
 	binary, err := os.ReadFile(spryncdBin)
@@ -506,8 +509,8 @@ func TestWSUploadAndRunSpryncd(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	uploaded := filepath.Join(rootDir, "tmp", "spryncd")
-	info, err := os.Stat(uploaded)
+	t.Cleanup(func() { os.Remove("/tmp/spryncd") })
+	info, err := os.Stat("/tmp/spryncd")
 	require.NoError(t, err)
 	assert.Equal(t, len(binary), int(info.Size()))
 	assert.True(t, info.Mode()&0111 != 0)
@@ -522,7 +525,7 @@ func TestWSUploadAndRunSpryncd(t *testing.T) {
 }
 
 func TestWSFSWriteAndRead(t *testing.T) {
-	_, client, rootDir := setupServer(t)
+	_, client, _ := setupServer(t)
 	ctx := context.Background()
 
 	content := []byte("hello world from sprync")
@@ -533,8 +536,8 @@ func TestWSFSWriteAndRead(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	written := filepath.Join(rootDir, "tmp", "test-file.txt")
-	got, err := os.ReadFile(written)
+	t.Cleanup(func() { os.Remove("/tmp/test-file.txt") })
+	got, err := os.ReadFile("/tmp/test-file.txt")
 	require.NoError(t, err)
 	assert.Equal(t, content, got)
 
@@ -703,12 +706,6 @@ func TestWSExtractIntoNonexistentDir(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(tarPath)
 
-	err = client.FSWrite(
-		ctx, "test-sprite", tarPath, "0644", false,
-		mustOpen(t, tarPath),
-	)
-	require.NoError(t, err)
-
 	newDir := filepath.Join(rootDir, "brand-new-dir")
 	sess := openSession(t, client, spryncdBin)
 	defer sess.Close(ctx)
@@ -779,12 +776,6 @@ func TestWSFileModePreservation(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(tarPath)
 
-	err = client.FSWrite(
-		ctx, "test-sprite", tarPath, "0644", false,
-		mustOpen(t, tarPath),
-	)
-	require.NoError(t, err)
-
 	destDir := filepath.Join(rootDir, "mode-test")
 	sess := openSession(t, client, spryncdBin)
 	defer sess.Close(ctx)
@@ -847,10 +838,181 @@ func TestWSSessionTimeout(t *testing.T) {
 	sess.Close(ctx)
 }
 
-func mustOpen(t *testing.T, path string) *os.File {
-	t.Helper()
-	f, err := os.Open(path)
+func TestWSSpriteToPush(t *testing.T) {
+	spryncdBin := buildSpryncd(t)
+	_, client, rootDir := setupServer(t)
+	ctx := context.Background()
+
+	srcDir := filepath.Join(rootDir, "src-project")
+	dstDir := filepath.Join(rootDir, "dst-project")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	require.NoError(t, os.MkdirAll(dstDir, 0755))
+
+	makeTree(t, srcDir, map[string]string{
+		"main.go":     "package main\nfunc main() {}",
+		"util.go":     "package main\nfunc util() {}",
+		"new_file.go": "new content",
+	})
+	makeTree(t, dstDir, map[string]string{
+		"main.go": "package main\nfunc main() {}",
+		"util.go": "package main\nfunc oldutil() {}",
+		"old.go":  "should be deleted",
+	})
+
+	srcSess := openSessionFor(
+		t, client, spryncdBin, "src-sprite",
+	)
+	defer srcSess.Close(ctx)
+
+	dstSess := openSessionFor(
+		t, client, spryncdBin, "dst-sprite",
+	)
+	defer dstSess.Close(ctx)
+
+	srcEntries, srcExists, _, err := srcSess.Manifest(
+		srcDir, nil,
+	)
 	require.NoError(t, err)
-	t.Cleanup(func() { f.Close() })
-	return f
+	assert.True(t, srcExists)
+
+	dstEntries, dstExists, _, err := dstSess.Manifest(
+		dstDir, nil,
+	)
+	require.NoError(t, err)
+	assert.True(t, dstExists)
+
+	srcM := make(pack.Manifest, len(srcEntries))
+	for _, e := range srcEntries {
+		srcM[e.Path] = e
+	}
+	dstM := make(pack.Manifest, len(dstEntries))
+	for _, e := range dstEntries {
+		dstM[e.Path] = e
+	}
+
+	diff := pack.ComputeDiff(srcM, dstM, true)
+	assert.Contains(t, diff.Uploads, "new_file.go")
+	assert.Contains(t, diff.Uploads, "util.go")
+	assert.Equal(t, []string{"old.go"}, diff.Deletes)
+
+	tmpDest := "/tmp/sprync-s2s-test.tar.gz"
+	t.Cleanup(func() { os.Remove(tmpDest) })
+	destURL := client.FSWriteURL(
+		"dst-sprite", tmpDest, "", false,
+	)
+
+	xferResult, err := srcSess.Transfer(
+		srcDir, diff.Uploads, true,
+		destURL, "test-token",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, len(diff.Uploads), xferResult.Count)
+	assert.True(t, xferResult.Size > 0)
+
+	extResult, err := dstSess.Extract(
+		dstDir, tmpDest, true,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, len(diff.Uploads), extResult.Count)
+
+	delResult, err := dstSess.Delete(
+		dstDir, diff.Deletes,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, delResult.Count)
+
+	got, err := os.ReadFile(
+		filepath.Join(dstDir, "util.go"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t,
+		"package main\nfunc util() {}", string(got),
+	)
+
+	got, err = os.ReadFile(
+		filepath.Join(dstDir, "new_file.go"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "new content", string(got))
+
+	_, err = os.Stat(filepath.Join(dstDir, "old.go"))
+	assert.True(t, os.IsNotExist(err))
+
+	got, err = os.ReadFile(
+		filepath.Join(dstDir, "main.go"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t,
+		"package main\nfunc main() {}", string(got),
+	)
 }
+
+func TestWSSpriteToPushBlind(t *testing.T) {
+	spryncdBin := buildSpryncd(t)
+	_, client, rootDir := setupServer(t)
+	ctx := context.Background()
+
+	srcDir := filepath.Join(rootDir, "src-blind")
+	dstDir := filepath.Join(rootDir, "dst-blind")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+
+	makeTree(t, srcDir, map[string]string{
+		"main.go":    "package main",
+		"src/lib.go": "package src",
+	})
+
+	srcSess := openSessionFor(
+		t, client, spryncdBin, "src-sprite",
+	)
+	defer srcSess.Close(ctx)
+
+	dstSess := openSessionFor(
+		t, client, spryncdBin, "dst-sprite",
+	)
+	defer dstSess.Close(ctx)
+
+	srcEntries, srcExists, _, err := srcSess.Manifest(
+		srcDir, nil,
+	)
+	require.NoError(t, err)
+	assert.True(t, srcExists)
+
+	_, dstExists, _, err := dstSess.Manifest(
+		dstDir, nil,
+	)
+	require.NoError(t, err)
+	assert.False(t, dstExists)
+
+	var allPaths []string
+	for _, e := range srcEntries {
+		allPaths = append(allPaths, e.Path)
+	}
+	sort.Strings(allPaths)
+
+	tmpDest := "/tmp/sprync-s2s-blind.tar.gz"
+	t.Cleanup(func() { os.Remove(tmpDest) })
+	destURL := client.FSWriteURL(
+		"dst-sprite", tmpDest, "", false,
+	)
+
+	xferResult, err := srcSess.Transfer(
+		srcDir, allPaths, true,
+		destURL, "test-token",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, xferResult.Count)
+
+	extResult, err := dstSess.Extract(
+		dstDir, tmpDest, true,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, extResult.Count)
+
+	_, err = os.Stat(filepath.Join(dstDir, "main.go"))
+	assert.NoError(t, err)
+	_, err = os.Stat(
+		filepath.Join(dstDir, "src/lib.go"),
+	)
+	assert.NoError(t, err)
+}
+

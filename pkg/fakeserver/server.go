@@ -28,12 +28,34 @@ type Server struct {
 func New(rootDir string) *Server {
 	s := &Server{RootDir: rootDir}
 	mux := http.NewServeMux()
-	prefix := "/v1/sprites/test-sprite"
-	mux.HandleFunc(prefix+"/fs/write", s.handleFSWrite)
-	mux.HandleFunc(prefix+"/fs/read", s.handleFSRead)
-	mux.HandleFunc(prefix+"/exec", s.handleExec)
+	mux.HandleFunc("/v1/sprites/", s.routeSprite)
 	s.HS = httptest.NewServer(mux)
 	return s
+}
+
+func (s *Server) routeSprite(
+	w http.ResponseWriter, r *http.Request,
+) {
+	rest, ok := strings.CutPrefix(
+		r.URL.Path, "/v1/sprites/",
+	)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
+	_, op, _ := strings.Cut(rest, "/")
+	op = "/" + op
+
+	switch {
+	case op == "/fs/write":
+		s.handleFSWrite(w, r)
+	case op == "/fs/read":
+		s.handleFSRead(w, r)
+	case op == "/exec":
+		s.handleExec(w, r)
+	default:
+		http.Error(w, "not found", 404)
+	}
 }
 
 func (s *Server) Close() {
@@ -50,8 +72,8 @@ func (s *Server) URL() string {
 }
 
 func (s *Server) resolvePath(p string) string {
-	if filepath.IsAbs(p) {
-		return filepath.Join(s.RootDir, p)
+	if strings.HasPrefix(p, "/tmp/") {
+		return p
 	}
 	return filepath.Join(s.RootDir, p)
 }

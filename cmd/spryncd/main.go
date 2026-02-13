@@ -9,6 +9,8 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +81,8 @@ func main() {
 			handleExtract(req, send)
 		case "delete":
 			handleDelete(req, send)
+		case "transfer":
+			handleTransfer(req, send)
 		case "quit":
 			cleanup()
 			os.Exit(0)
@@ -358,4 +362,115 @@ func validatePaths(pathList []string) error {
 
 func validTmpPath(p string) bool {
 	return p != "" && strings.HasPrefix(p, "/tmp/")
+}
+
+func handleTransfer(
+	req *protocol.Request, send sender,
+) {
+	if err := validateDir(req.Dir); err != nil {
+		send.fatal(err.Error())
+		return
+	}
+	if err := validatePaths(req.Paths); err != nil {
+		send.fatal(err.Error())
+		return
+	}
+	for _, p := range req.Paths {
+		full := filepath.Join(req.Dir, p)
+		if !paths.IsWithinDir(req.Dir, full) {
+			send.fatal(
+				fmt.Sprintf("path escapes dir: %s", p),
+			)
+			return
+		}
+	}
+	if req.URL == "" {
+		send.fatal("missing url")
+		return
+	}
+	if req.Token == "" {
+		send.fatal("missing token")
+		return
+	}
+
+	pr, pw := io.Pipe()
+
+	type packResult struct {
+		count int
+		err   error
+	}
+	ch := make(chan packResult, 1)
+
+	go func() {
+		count, err := pack.PackTar(
+			req.Dir, req.Paths, pw, req.Compress,
+		)
+		pw.CloseWithError(err)
+		ch <- packResult{count, err}
+	}()
+
+	cr := &countingReader{r: pr}
+	httpReq, err := http.NewRequest("PUT", req.URL, cr)
+	if err != nil {
+		pr.Close()
+		send.fatal(fmt.Sprintf("build request: %s", err))
+		return
+	}
+	httpReq.Header.Set(
+		"Authorization", "Bearer "+req.Token,
+	)
+	httpReq.Header.Set(
+		"Content-Type", "application/octet-stream",
+	)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		send.fatal(fmt.Sprintf("transfer: %s", err))
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		send.fatal(
+			fmt.Sprintf(
+				"transfer http %d", resp.StatusCode,
+			),
+		)
+		return
+	}
+
+	res := <-ch
+	if res.err != nil {
+		send.fatal(fmt.Sprintf("pack: %s", res.err))
+		return
+	}
+
+	dest := extractPathParam(req.URL)
+
+	send(protocol.Response{
+		Type:  protocol.TypeTransferDone,
+		Count: res.count,
+		Size:  cr.n,
+		Dest:  dest,
+	})
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func extractPathParam(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("path")
 }
